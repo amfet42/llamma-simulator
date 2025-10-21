@@ -8,16 +8,19 @@ class BasePriceOracle(ABC):
 
 class EmaPriceOracle(BasePriceOracle):
     def __init__(self, t_exp: float):
-        self.t_exp = t_exp
+        self.t_exp = t_exp  # in seconds
 
     def calculate_oracle_prices(self, price_data: list) -> list:
+        """
+        Important: price data time is in seconds
+        """
         data = []
 
         ema = price_data[0][1]
         ema_t = price_data[0][0]
-        for t, _, high, low, _, _ in price_data:
-            ema_mul = 2 ** (-(t - ema_t) / (1000 * self.t_exp))
-            ema = ema * ema_mul + (low + high) / 2 * (1 - ema_mul)
+        for t, _, _, _, close, _ in price_data:
+            ema_mul = 2 ** (-(t - ema_t) / self.t_exp)
+            ema = ema * ema_mul + close * (1 - ema_mul)
             ema_t = t
             data.append(ema)
 

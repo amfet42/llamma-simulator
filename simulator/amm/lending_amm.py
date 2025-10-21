@@ -3,28 +3,14 @@ from math import floor, log, sqrt
 
 
 class LendingAMM:
-    def __init__(
-        self,
-        p_base: float,
-        A: int,
-        fee: float = 0,
-        dynamic_fee_multiplier=0.0,
-        use_po_fee: bool = True,
-        po_fee_delay: int = 1,
-    ):
+    def __init__(self, p_base: float, A: int):
         self.p_base = p_base
         self.p_oracle = p_base
         self.prev_p_oracle = p_base
-        self.old_dfee = 0
         self.A = A
         self.bands_x = defaultdict(float)
         self.bands_y = defaultdict(float)
         self.active_band = 0
-        self.fee = fee
-        self.dynamic_fee_multiplier = dynamic_fee_multiplier
-        self.use_po_fee = use_po_fee
-        self.po_fee_delay = po_fee_delay
-        self.oracle_history = []
 
     # Deposit:
     # - above active band - only in y,
@@ -39,40 +25,21 @@ class LendingAMM:
     #  - reduced_input *= (1 - fee), calc output for reduced_input, split fee * input across bands touched
 
     def set_p_oracle(self, p):
-        if self.use_po_fee:
-            if len(self.oracle_history) >= 1:
-                self.prev_p_oracle = self.oracle_history[-1]
-            else:
-                self.prev_p_oracle = self.p_oracle
-            self.oracle_history.append(p)
-        else:
-            self.prev_p_oracle = p
+        self.prev_p_oracle = self.p_oracle
         self.p_oracle = p
 
-    def dynamic_fee(self, n_band, new=True):
+    def dynamic_fee(self, n_band):
+        """
+        Dynamic fee equal to a quarter of difference between current price and the price of price oracle
+        """
+        dynamic_fee_multiplier = 0.25
+        p_oracle = self.p_oracle
         p_up = self.p_up(n_band)
-        p_down = self.p_down(n_band)
-        diff1 = p_up - self.p_oracle
-        diff2 = self.p_oracle - p_down
 
-        fee = self.fee
-
-        if self.use_po_fee:
-            if new:
-                r = min(self.prev_p_oracle, self.p_oracle) / max(self.prev_p_oracle, self.p_oracle)
-                fee = (self.old_dfee + (1 - r**3)) * (self.po_fee_delay - 1) / self.po_fee_delay
-                self.old_dfee = fee
-                fee = max(fee, self.fee)
-            else:
-                fee = max(self.old_dfee, self.fee)
-
-        if self.dynamic_fee_multiplier > 0:
-            if (p_down > self.p_oracle) or (p_up < self.p_oracle):
-                # Fee if not current band
-                fee = max(fee, min([abs(diff1), abs(diff2)]) / (2 * self.p_oracle) * self.dynamic_fee_multiplier)
-            # No addition if in the band
-
-        return fee
+        if p_oracle > p_up:
+            return ((p_oracle - p_up) / p_oracle) * dynamic_fee_multiplier
+        else:
+            return ((p_up - p_oracle) / p_up) * dynamic_fee_multiplier
 
     def p_down(self, n_band):
         """
@@ -173,9 +140,10 @@ class LendingAMM:
             y0 = self.get_y0()
         return (self.get_f(y0) + x) / (self.get_g(y0) + y)
 
-    def trade_to_price(self, price):
+    def trade_to_price(self, price) -> tuple:
         """
         Not the method to be present in real smart contract, for simulations only
+        Returns tuple of x and y changes in target band
         """
 
         if self.bands_x[self.active_band] == 0 and self.bands_y[self.active_band] == 0:
@@ -204,23 +172,26 @@ class LendingAMM:
 
         while True:
             n = self.active_band
+            assert -500 < n < 500, "active band should not exceed 500"
+
+            x = self.bands_x[n]
+            y = self.bands_y[n]
+
+            if x == 0 and y == 0:
+                if self.p_down(n) <= price <= self.p_up(n):
+                    break
+                self.active_band += bstep
+                continue
+
             y0 = self.get_y0()
             g = self.get_g(y0)
             f = self.get_f(y0)
-            x = self.bands_x[n]
-            y = self.bands_y[n]
             # (f + x)(g + y) = const = p_oracle * A**2 * y0**2 = I
             Inv = (f + x) * (g + y)
             # p = (f + x) / (g + y) => p * (g + y)**2 = I or (f + x)**2 / p = I
             price = original_price
 
-            if x == 0 and y == 0:
-                if price >= self.p_down(n) and price <= self.p_up(n):
-                    break
-                self.active_band += bstep
-                continue
-
-            fee = self.dynamic_fee(n, new=False)
+            fee = self.dynamic_fee(n)
             p_c_d = self.p_down(n)
             p_c_u = self.p_up(n)
 
@@ -277,9 +248,6 @@ class LendingAMM:
             dx += self.bands_x[n] - x
             dy += self.bands_y[n] - y
 
-            if abs(n) > 1000:
-                raise Exception("We should not be here ever")
-
         return dx, dy
 
     def get_y_up(self, n):
@@ -319,8 +287,8 @@ class LendingAMM:
         # p = (f + x) / (g + y) => p * (g + y)**2 = I or (f + x)**2 / p = I
 
         # First, "trade" in this band to p_oracle
-        x_o = 0
-        y_o = 0
+        # x_o = 0
+        # y_o = 0
 
         if p_o > p_o_up:  # p_o < p_current_down, all to y
             # x_o = 0
@@ -335,14 +303,6 @@ class LendingAMM:
         else:
             # y_o__ = max(sqrt(Inv / p_o), g) - g
             # x_o__ = max(Inv / (g + y_o__), f) - f
-
-            # y_o = self.A * y0 * (1 - p_o_down / p_o)
-            # x_o = self.A * y0 * p_o * (1 - p_o / p_o_up)
-
-            # print('p_o =', p_o, 'p_o_up =', p_o_up, 'p_o_down =', p_o_down)
-            # print('x', x_o__, '->', x_o)
-            # print('y', y_o__, '->', y_o)
-            # print()
 
             y_o = self.A * y0 * (1 - p_o_down / p_o)
             x_o = max(Inv / (g + y_o), f) - f
@@ -387,8 +347,8 @@ class LendingAMM:
         # p = (f + x) / (g + y) => p * (g + y)**2 = I or (f + x)**2 / p = I
 
         # First, "trade" in this band to p_oracle
-        x_o = 0
-        y_o = 0
+        # x_o = 0
+        # y_o = 0
 
         if p_o > p_o_up:  # p_o < p_current_down, all to y
             # x_o = 0
@@ -403,6 +363,7 @@ class LendingAMM:
         else:
             # y_o = max(sqrt(Inv / p_o), g) - g
             # x_o = max(Inv / (g + y_o), f) - f
+
             y_o = self.A * y0 * (1 - p_o_down / p_o)
             x_o = max(Inv / (g + y_o), f) - f
             # Now adiabatic conversion from definitely in-band

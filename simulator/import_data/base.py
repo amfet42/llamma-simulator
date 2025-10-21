@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Example DATA ETH-USD
 # [
 #   [
-#     1499040000,          // Open time (timestamp)
+#     1499040000,          // Open time (timestamp) in seconds
 #     3000.01634790,       // Open
 #     3020.80000000,       // High
 #     2970.01575800,       // Low
