@@ -7,7 +7,7 @@ class BasePriceOracle(ABC):
 
 
 class EmaPriceOracle(BasePriceOracle):
-    def __init__(self, t_exp: float):
+    def __init__(self, t_exp: int):
         self.t_exp = t_exp  # in seconds
 
     def calculate_oracle_prices(self, price_data: list) -> list:

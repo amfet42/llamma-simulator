@@ -1,4 +1,5 @@
 import asyncio
+import gzip
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -42,7 +43,8 @@ class BaseImporter(ABC):
 
     @classmethod
     def get_data_path(cls, pair: Pair) -> Path:
-        return BASE_DIR / "data" / pair / f"{pair}-{cls.interval}-{cls.name}.json"
+        # Compress for saving in repo
+        return BASE_DIR / "data" / pair / f"{pair}-{cls.interval}-{cls.name}.json.gz"
 
     @classmethod
     @abstractmethod
@@ -52,8 +54,8 @@ class BaseImporter(ABC):
     def save(cls, pair: Pair, data: list[Any]) -> None:
         path = cls.get_data_path(pair)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w") as f:
-            json.dump(data, f)
+        with gzip.open(path, "w") as f:
+            f.write(json.dumps(data).encode("utf-8"))
         logger.info(f"Saved data to {path}.")
 
     @classmethod

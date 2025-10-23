@@ -1,4 +1,7 @@
-from collections.abc import Iterable
+import json
+import logging
+
+from numpy import log10, logspace
 
 from simulator.amm.intitial_liquidity import ConstantInitialLiquidity
 from simulator.amm.price_history_loader import GenericPriceHistoryLoader
@@ -6,63 +9,130 @@ from simulator.amm.price_oracle import EmaPriceOracle
 from simulator.amm.simulator import Simulator
 from simulator.settings import BASE_DIR, Pair
 
-EXT_FEE = 5e-4
+logger = logging.getLogger(__name__)
 
 
-def scan_param(pair: str, t_exp, **kw):
-    price_oracle = EmaPriceOracle(t_exp=t_exp)
-    price_history_loader = GenericPriceHistoryLoader(pair=Pair(pair))
-    simulator = Simulator(
-        initial_liquidity_class=ConstantInitialLiquidity,
-        price_oracle=price_oracle,
-        external_fee=EXT_FEE,
-        price_history_loader=price_history_loader,
-    )
-    args = {"samples": 50, "n_top_samples": 5, "min_loan_duration": 0.15, "max_loan_duration": 0.15}
-    args.update(kw)
-    iterable_args = [k for k in kw if isinstance(kw[k], Iterable) and not isinstance(kw[k], dict)]
-    assert len(iterable_args) == 1, "Not one iterable item"
-    scanned_name = iterable_args[0]
-    scanned_args = kw[scanned_name]
-    del args[scanned_name]
+class Calculator:
+    EXTERNAL_FEE = 5e-4  # fee paid by arbitragers to external platforms
 
-    losses = []
-    discounts = []
+    @classmethod
+    def simulate_A(
+        cls,
+        pair: str,
+        t_exp: int,
+        samples: int = 500000,
+        n_top_samples: int = 50,
+        dynamic_fee_multiplier: float | None = 0.25,
+        min_loan_duration: float | None = None,
+        max_loan_duration: float | None = None,
+        initial_liquidity_range: int = 4,
+    ):
+        price_oracle = EmaPriceOracle(t_exp=t_exp)
+        price_history_loader = GenericPriceHistoryLoader(pair=Pair(pair))
 
-    for v in scanned_args:
-        args[scanned_name] = v
-        loss = simulator.get_loss_rate(**args)
-        A = args["A"]
-        initial_liquidity_range = args["initial_liquidity_range"]
-
-        # Simplified formula
-        # bands_coefficient = (((A - 1) / A) ** range_size) ** 0.5
-        # More precise
-        bands_coefficient = (
-            sum(((A - 1) / A) ** (k + 0.5) for k in range(initial_liquidity_range)) / initial_liquidity_range
+        simulator = Simulator(
+            initial_liquidity_class=ConstantInitialLiquidity,
+            price_history_loader=price_history_loader,
+            price_oracle=price_oracle,
+            external_fee=cls.EXTERNAL_FEE,
         )
-        cl = 1 - (1 - loss) * bands_coefficient
 
-        print(f"{scanned_name}={v}\t->\tLoss={loss},\tLiq_discount={cl}")
+        losses = []
+        discounts = []
 
-        losses.append(loss)
-        discounts.append(cl)
+        kwargs = {
+            "samples": samples,
+            "n_top_samples": n_top_samples,
+            "initial_liquidity_range": initial_liquidity_range,
+            "dynamic_fee_multiplier": dynamic_fee_multiplier,
+            "min_loan_duration": min_loan_duration,
+            "max_loan_duration": max_loan_duration,
+        }
 
-    save_plot(pair, "losses", f"losses__{'_'.join(str(k) for k in args.values())}]", (scanned_args, losses))
-    save_plot(pair, "discounts", f"discounts__{'_'.join(str(k) for k in args.values())}]", (scanned_args, discounts))
-    return [(scanned_args, losses), (scanned_args, discounts)]
+        a_range = [int(a) for a in logspace(log10(30), log10(500), 30)]
+        for a in a_range:
+            kwargs_with_a = {**kwargs, "A": a}
+            loss = simulator.get_loss_rate(**kwargs_with_a)
+
+            # Simplified formula
+            # bands_coefficient = (((A - 1) / A) ** range_size) ** 0.5
+            # More precise
+            bands_coefficient = (
+                sum(((a - 1) / a) ** (k + 0.5) for k in range(initial_liquidity_range)) / initial_liquidity_range
+            )
+            liquidation_discount = 1 - (1 - loss) * bands_coefficient
+
+            logger.info(f"Params: {kwargs_with_a}, loss: {loss}, liquidation discount: {liquidation_discount}")
+
+            losses.append(loss)
+            discounts.append(liquidation_discount)
+
+        results = [(a_range, losses), (a_range, discounts)]
+
+        save_json_results(pair, f"losses_A__{samples}_{n_top_samples}", results)
+        save_plot(
+            pair,
+            f"losses_A__{samples}_{n_top_samples}",
+            (a_range, losses),
+            (a_range, discounts),
+            {"xlabel": "A", "ylabel": "Loss"},
+            kwargs,
+        )
+        return results
 
 
-def save_plot(pair: str, parameter_name: str, file_name: str, losses: tuple):
+def save_plot(
+    pair: str,
+    file_name: str,
+    losses: tuple,
+    discounts: tuple,
+    plot_kwargs: dict,
+    capture_kwargs: dict,
+):
     import matplotlib.pyplot as plt
 
-    x, y = losses
+    plt.plot(losses[0], losses[1], label="Loss")
+    plt.plot(discounts[0], discounts[1], label="Liquidation Discount")
 
-    plt.plot(x, y)
+    # Min liquidation discount
+    min_discount = min(discounts[1])
+    min_discount_index = discounts[1].index(min_discount)
+    min_discount_A = discounts[0][min_discount_index]
+    plt.axvline(x=min_discount_A, color="black", linestyle="--", linewidth=2)
+    plt.text(
+        min_discount_A * 1.05,
+        max(discounts[1]) * 0.4,
+        f"A = {min_discount_A}, Discount={min_discount:.3f}",
+        rotation=90,
+        color="black",
+        va="bottom",
+    )
+
+    # Caption text for parameters
+    plt.text(
+        15,
+        max(discounts[1]),  # (x, y) position on chart
+        "\n".join(f"{k}: {capture_kwargs[k]}" for k in capture_kwargs if capture_kwargs[k] is not None),
+        color="black",
+        bbox=dict(
+            facecolor="lightyellow",  # background color
+            edgecolor="black",  # border color
+            boxstyle="round,pad=0.5",  # rounded corners and padding
+        ),
+    )
+
     plt.grid()
-    plt.ylabel("Loss")
-    plt.xlabel(parameter_name)
+    plt.xlabel(plot_kwargs.get("xlabel", "x"))
+    plt.ylabel(plot_kwargs.get("ylabel", "Loss"))
+    plt.legend(loc="best")
 
     path = BASE_DIR / "results" / pair / f"{file_name}.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=300, bbox_inches="tight")
+
+
+def save_json_results(pair, file_name, results):
+    path = BASE_DIR / "results" / pair / f"{file_name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(results, f)

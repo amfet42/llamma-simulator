@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import gzip
 import json
 import logging
 from typing import Any
@@ -144,5 +145,5 @@ class BinanceImporter(BaseImporter):
     @classmethod
     def load(cls, pair: Pair) -> list[Any]:
         path = cls.get_data_path(pair)
-        with open(path, "r") as f:
+        with gzip.open(path, "r") as f:
             return json.load(f)

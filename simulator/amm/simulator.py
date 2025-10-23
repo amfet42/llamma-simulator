@@ -1,10 +1,14 @@
+import logging
 import random
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 
 from .intitial_liquidity import BaseRangeInitialLiquidity
 from .lending_amm import LendingAMM
 from .price_history_loader import BasePriceHistoryLoader
 from .price_oracle import BasePriceOracle
+
+logger = logging.getLogger(__name__)
 
 
 class Simulator:
@@ -14,45 +18,36 @@ class Simulator:
         initial_liquidity_class: type[BaseRangeInitialLiquidity],
         price_history_loader: BasePriceHistoryLoader,
         price_oracle: BasePriceOracle,
-        external_fee: float,
-        min_loan_duration: int = 1,  # days
-        max_loan_duration: int = 1,  # days
-        samples: int = 400,
-        dynamic_fee_multiplier: int = 0,
-        use_po_fee: bool = True,
-        po_fee_delay: int = 2,
-        log_enabled: bool = False,
-        verbose: bool = False,
+        external_fee: float = 0.0,  # should be 0 < external_fee < 1
     ):
         """
-        :param initial_liquidity:
-        :param price_history_loader:
-        :param price_oracle:
-        :param external_fee: Fee which arb trader pays to external platforms
-        :param min_loan_duration:
-        :param max_loan_duration:
-        :param samples:
-        :param dynamic_fee_multiplier:
-        :param use_po_fee:
-        :param po_fee_delay:
-        :param log_enabled:
-        :param verbose:
+        :param initial_liquidity_class: initial liquidity for AMM (class, initialized in simulator), min=4 worst case
+        :param price_history_loader: load prices source
+        :param price_oracle: oracle prices calculater (can choose different oracles)
+        :param external_fee: fee paid by arbitragers to external platforms
+
+        min_loan_duration: minimal duration of loan in liquidation in days (actual is chosen randomly every run)
+        max_loan_duration: maximum duration of loan in liquidation days (actual is chosen randomly every run)
+        log_enabled: enable logging
+        verbose: Output losses after each iteration for every run
+
+        Usually positions are in liquidation in < 30 min so 1/48 is reasonable approximation
         """
 
         self.initial_liquidity_class = initial_liquidity_class
         self.price_history_loader = price_history_loader
         self.price_oracle = price_oracle
         self.external_fee = external_fee
-        self.min_loan_duration = min_loan_duration
-        self.max_loan_duration = max_loan_duration
-        self.samples = samples
-        self.dynamic_fee_multiplier = dynamic_fee_multiplier
-        self.use_po_fee = use_po_fee
-        self.po_fee_delay = po_fee_delay
-        self.log_enabled = log_enabled
-        self.verbose = verbose
 
-        self.oracle_prices = []
+        # Default parameters
+        self.samples = 400
+        self.min_loan_duration = 1 / 48  # days
+        self.max_loan_duration = 1 / 24  # days
+        self.log_enabled: bool = False
+        self.verbose: bool = False
+
+        self.prices = self.load_prices()
+        self.oracle_prices = self.calculate_oracle_price(self.prices)
 
     def load_prices(self) -> list:
         return self.price_history_loader.load_prices()
@@ -62,84 +57,74 @@ class Simulator:
 
     def single_run(
         self,
-        prices: list,
         A: int,
-        fee: float,
         position_start: float,  # [0, 1)
         position_period: float,  # [0, 1 - position_start)
-        initial_liquidity_range: int,
-        position_shift: float = 0,  # [0, 1)
-        **kw,
+        initial_liquidity_range: int,  # p0 then n number of bands
+        dynamic_fee_multiplier: float | None = None,
+        position_shift: float = 0,  # [0, 1) how much lower from current prices
     ):
         """
         position: 0..1
         size: fraction of all price data length for size
         """
-        oracle_prices = self.calculate_oracle_price(prices)
-
         # Data for prices
-        pos = (int(position_start * len(prices)), int((position_start + position_period) * len(prices)))
-        data = prices[pos[0] : pos[1]]
-        oracle_data = oracle_prices[pos[0] : pos[1]]
-        p0 = data[0][1] * (1 - position_shift)
+        position_start_index = int(position_start * len(self.prices))  # start of position in prices array
+        position_end_index = int(
+            (position_start + position_period) * len(self.prices)
+        )  # end of position in prices array
+
+        prices_for_simulation = self.prices[position_start_index:position_end_index]
+        oracle_prices_for_simulation = self.oracle_prices[position_start_index:position_end_index]
+        p0 = prices_for_simulation[0][1] * (1 - position_shift)
 
         initial_y0 = 1.0  # 1 ETH
         p_base = p0 * (A / (A - 1) + 1e-4)
         initial_x_value = initial_y0 * p_base
-        amm = LendingAMM(p_base, A, fee, **kw)
+        amm = LendingAMM(p_base, A, dynamic_fee_multiplier)
 
         # Fill ticks with liquidity
         self.initial_liquidity_class(p0, initial_liquidity_range).deposit(amm, initial_y0)
         initial_all_x = amm.get_all_x()
 
-        losses = []
+        xs_normalized = []
         fees = []
 
-        def find_target_price(p, is_up=True, new=False):
+        def find_target_price(p, is_up=True):
+            # Find target band
             if is_up:
                 for n in range(amm.max_band, amm.min_band - 1, -1):
                     p_down = amm.p_down(n)
-                    dfee = amm.dynamic_fee(n, new=new)
-                    p_down_ = p_down * (1 + dfee)
-                    # XXX print(n, amm.min_band, amm.max_band, p_down, p, amm.get_p())
-                    if p > p_down_:
-                        p_up = amm.p_up(n)
-                        p_up_ = p_up * (1 + dfee)
-                        # if p >= p_up_:
-                        #     return p_up
-                        # else:
-                        return (p - p_down_) / (p_up_ - p_down_) * (p_up - p_down) + p_down
+                    d_fee = amm.dynamic_fee(n)
+                    p_down_with_fee = p_down * (1 + d_fee)
+
+                    if p > p_down_with_fee:
+                        return p * (1 - d_fee)
+
             else:
                 for n in range(amm.min_band, amm.max_band + 1):
                     p_up = amm.p_up(n)
-                    dfee = amm.dynamic_fee(n, new=new)
-                    p_up_ = p_up * (1 - dfee)
+                    d_fee = amm.dynamic_fee(n)
+                    p_up_ = p_up * (1 - d_fee)
+
                     if p < p_up_:
-                        p_down = amm.p_down(n)
-                        p_down_ = p_down * (1 - dfee)
-                        return p_up - (p_up_ - p) / (p_up_ - p_down_) * (p_up - p_down)
+                        return p * (1 + d_fee)
 
+            # price is outside of liquidity
             if is_up:
-                return p * (1 - amm.dynamic_fee(amm.min_band, new=False))
+                return p * (1 - amm.dynamic_fee(amm.min_band))
             else:
-                return p * (1 + amm.dynamic_fee(amm.max_band, new=False))
+                return p * (1 + amm.dynamic_fee(amm.max_band))
 
-        for (t, o, high, low, c, vol), oracle_price in zip(data, oracle_data):
+        # <----------------- Calculation ----------------->
+        for (t, open, high, low, close, vol), oracle_price in zip(prices_for_simulation, oracle_prices_for_simulation):
             amm.set_p_oracle(oracle_price)
-            # max_price = amm.p_up(amm.max_band)
-            # min_price = amm.p_down(amm.min_band)
-            high = find_target_price(high * (1 - self.external_fee), is_up=True, new=True)
-            low = find_target_price(low * (1 + self.external_fee), is_up=False, new=False)
-            # high = high * (1 - EXT_FEE - fee)
-            # low = low * (1 + EXT_FEE + fee)
-            # if high > amm.get_p():
-            #     print(high, '/', high_, '/', max_price, '; ', low, '/', low_, '/', min_price)
+
+            high = find_target_price(high * (1 - self.external_fee), is_up=True)
+            low = find_target_price(low * (1 + self.external_fee), is_up=False)
+
             if high > amm.get_p():
-                try:
-                    amm.trade_to_price(high)
-                except Exception:
-                    print(high, low, amm.get_p())
-                    raise
+                amm.trade_to_price(high)
 
             # Not correct for dynamic fees which are too high
             # if high > max_price:
@@ -158,68 +143,83 @@ class Simulator:
             #         assert amm.bands_x[n] == 0
             #         assert amm.bands_y[n] > 0
 
-            d = datetime.fromtimestamp(t // 1000).strftime("%Y/%m/%d %H:%M")
-            fees.append(amm.dynamic_fee(amm.active_band, new=False))
-            if self.log_enabled or self.verbose:
-                loss = amm.get_all_x() / initial_x_value * 100
-                if self.log_enabled:
-                    print(f"{d}\t{o:.2f}\t{oracle_price:.2f}\t{amm.get_p():.2f}\t\t{loss:.2f}%")
-                if self.verbose:
-                    losses.append([t // 1000, loss / 100])
+            d = datetime.fromtimestamp(t).strftime("%Y/%m/%d %H:%M")
+            fees.append(amm.dynamic_fee(amm.active_band))
+            if self.log_enabled:
+                current_x_total_normalized = amm.get_all_x() / initial_x_value
+                logger.info(
+                    f"Current x total for {d}: {current_x_total_normalized:.4f}, oracle price: {oracle_price:.2f}, amm_price: {amm.get_p():.2f}"
+                )
 
-        if losses:
-            self.losses = losses
+            if self.verbose:
+                current_x_total_normalized = amm.get_all_x() / initial_x_value
+                xs_normalized.append([t, current_x_total_normalized])
+
+        if self.verbose:
+            logger.info(f"Xs after trades list: {xs_normalized}")
 
         loss = 1 - amm.get_all_x() / initial_all_x
         return loss
 
+    def single_run_kw(self, kw):
+        return self.single_run(**kw)
+
     def get_loss_rate(
         self,
         A: int,
-        fee: float,
         initial_liquidity_range: int,
+        dynamic_fee_multiplier: float | None = None,
         samples: int | None = None,
+        n_top_samples: int | None = None,
         max_loan_duration: float | None = None,
         min_loan_duration: float | None = None,
-        n_top_samples: int | None = None,
-        other={},
+        position_shift: float = 0,
+        use_threading: bool = False,  # somehow it's slower
     ):
-        _other = {k: v for k, v in other.items()}
-        _other.update(other)
-        other = _other
         if not samples:
             samples = self.samples
-
         if not max_loan_duration:
             max_loan_duration = self.max_loan_duration
-
         if not min_loan_duration:
             min_loan_duration = self.min_loan_duration
 
-        prices = self.load_prices()
+        day_fraction = 86400 / (self.prices[-1][0] - self.prices[0][0])  # Which fraction of all data is 1 day
 
-        dt = 86400 * 1000 / (prices[-1][0] - prices[0][0])  # Which fraction of all data is 1 day
-
-        result = []
+        kwargs_list = []
         for _ in range(samples):
-            try:
-                sr_result = self.single_run(
-                    prices=prices,
-                    A=A,
-                    fee=fee,
-                    position_start=random.random(),
-                    position_period=(max_loan_duration - min_loan_duration) * dt * random.random()
-                    + min_loan_duration * dt,
-                    initial_liquidity_range=initial_liquidity_range,
-                    position_shift=0,
-                    **other,
-                )
-                print(sr_result)
-                result.append(sr_result)
-            except Exception as e:
-                print(e)
-                return 0
+            position_start = random.random()
+            position_period = min_loan_duration * day_fraction
+            position_period += (max_loan_duration - min_loan_duration) * day_fraction * random.random()
+
+            kwargs_list.append(
+                {
+                    "A": A,
+                    "position_start": position_start,
+                    "position_period": position_period,
+                    "initial_liquidity_range": initial_liquidity_range,
+                    "dynamic_fee_multiplier": dynamic_fee_multiplier,
+                    "position_shift": position_shift,
+                }
+            )
+
+        if use_threading:
+            with ProcessPoolExecutor(max_workers=8) as pool:
+                results = pool.map(self.single_run_kw, kwargs_list)
+        else:
+            results = []
+            for kw in kwargs_list:
+                try:
+                    sr_result = self.single_run(**kw)
+                    if self.log_enabled:
+                        logger.info(
+                            f"Results A:{kw['A']}, position_start:{kw['position_start']}, "
+                            f"position_period:{kw['position_period']}: {kw['sr_result']}"
+                        )
+                    results.append(sr_result)
+                except Exception as e:
+                    logger.warning(e)
+                    results.append(0)
 
         if not n_top_samples:
             n_top_samples = samples // 20
-        return sum(sorted(result)[::-1][:n_top_samples]) / n_top_samples
+        return sum(sorted(results)[::-1][:n_top_samples]) / n_top_samples

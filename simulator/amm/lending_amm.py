@@ -3,11 +3,12 @@ from math import floor, log, sqrt
 
 
 class LendingAMM:
-    def __init__(self, p_base: float, A: int):
+    def __init__(self, p_base: float, A: int, dynamic_fee_multiplier: float | None = None):
         self.p_base = p_base
         self.p_oracle = p_base
         self.prev_p_oracle = p_base
         self.A = A
+        self.dynamic_fee_multiplier = dynamic_fee_multiplier if dynamic_fee_multiplier is not None else 0.25
         self.bands_x = defaultdict(float)
         self.bands_y = defaultdict(float)
         self.active_band = 0
@@ -30,16 +31,15 @@ class LendingAMM:
 
     def dynamic_fee(self, n_band):
         """
-        Dynamic fee equal to a quarter of difference between current price and the price of price oracle
+        Dynamic fee equal to a quarter (by default) of difference between current price and the price of price oracle
         """
-        dynamic_fee_multiplier = 0.25
         p_oracle = self.p_oracle
         p_up = self.p_up(n_band)
 
         if p_oracle > p_up:
-            return ((p_oracle - p_up) / p_oracle) * dynamic_fee_multiplier
+            return ((p_oracle - p_up) / p_oracle) * self.dynamic_fee_multiplier
         else:
-            return ((p_up - p_oracle) / p_up) * dynamic_fee_multiplier
+            return ((p_up - p_oracle) / p_up) * self.dynamic_fee_multiplier
 
     def p_down(self, n_band):
         """
