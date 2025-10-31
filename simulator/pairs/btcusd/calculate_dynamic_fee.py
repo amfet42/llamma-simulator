@@ -4,11 +4,12 @@ from simulator.calculation import Calculator
 from simulator.logging import setup_logger
 
 setup_logger()
+
 logger = logging.getLogger(__name__)
 
 
 # Change parameters before running
-def calculate_a() -> None:
+def calculate_dynamic_fee() -> None:
     """
     Iterate through range of A to find best A
 
@@ -20,16 +21,18 @@ def calculate_a() -> None:
     initial_liquidity_range - number of bands initially to have liquidity
     """
 
-    results = Calculator.simulate_A(
+    results = Calculator.simulate_dynamic_fee(
         pair="BTCUSDT",
+        a=60,
         t_exp=600,
         samples=500_000,
         n_top_samples=50,
-        dynamic_fee_multiplier=0.25,
         initial_liquidity_range=4,
     )
     logger.info(f"Results: {results}")
 
 
+
+
 if __name__ == "__main__":
-    calculate_a()
+    calculate_dynamic_fee()

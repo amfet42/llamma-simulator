@@ -3,7 +3,7 @@ name = "llamma-sim"
 version = "0.1.0"
 description = "Simulator for Curve LlamaLend"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "aiohttp>=3.12.15",
     "matplotlib>=3.10.7",
@@ -33,7 +33,7 @@ exclude = '''
 )
 '''
 line-length = 120
-target_version = ['py312']
+target_version = ['py311']
 
 [tool.isort]
 profile = "black"

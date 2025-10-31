@@ -10,6 +10,15 @@ uv venv
 uv sync
 ```
 
+### Recommended python version
+It's recommended to use pypy to do faster simulations
+
+```
+uv python install pypy@3.11
+uv venv --python pypy@3.11
+uv sync -p pypy@3.11
+```
+
 ## Running simulations
 
 ### Import data
@@ -35,4 +44,9 @@ Results automatically will be saved in results folder.
 
 ### Separate scripts
 
-Script ran for every pair is stored in `simulator/pairs` directory to save parameters used in caclulations
+Script ran for every pair is stored in `simulator/pairs` directory to save parameters used in calculations
+
+```
+export PYTHONPATH="${PYTHONPATH}:/path/to/your/directory"
+python simulator/pairs/btcusd/calculate_a.py
+```

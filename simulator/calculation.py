@@ -80,6 +80,136 @@ class Calculator:
         )
         return results
 
+    @classmethod
+    def simulate_range(
+        cls,
+        pair: str,
+        t_exp: int,
+        a: int,
+        samples: int = 500000,
+        n_top_samples: int = 50,
+        dynamic_fee_multiplier: float | None = 0.25,
+        min_loan_duration: float | None = None,
+        max_loan_duration: float | None = None,
+    ):
+        price_oracle = EmaPriceOracle(t_exp=t_exp)
+        price_history_loader = GenericPriceHistoryLoader(pair=Pair(pair))
+
+        simulator = Simulator(
+            initial_liquidity_class=ConstantInitialLiquidity,
+            price_history_loader=price_history_loader,
+            price_oracle=price_oracle,
+            external_fee=cls.EXTERNAL_FEE,
+        )
+
+        losses = []
+        discounts = []
+
+        kwargs = {
+            "samples": samples,
+            "n_top_samples": n_top_samples,
+            "A": a,
+            "dynamic_fee_multiplier": dynamic_fee_multiplier,
+            "min_loan_duration": min_loan_duration,
+            "max_loan_duration": max_loan_duration,
+        }
+
+        liquidity_range = list(range(4, 50, 4))
+        for initial_liquidity_range in liquidity_range:
+            kwargs_with_a = {**kwargs, "initial_liquidity_range": initial_liquidity_range}
+            loss = simulator.get_loss_rate(**kwargs_with_a)
+
+            # Simplified formula
+            # bands_coefficient = (((A - 1) / A) ** range_size) ** 0.5
+            # More precise
+            bands_coefficient = (
+                sum(((a - 1) / a) ** (k + 0.5) for k in range(initial_liquidity_range)) / initial_liquidity_range
+            )
+            liquidation_discount = 1 - (1 - loss) * bands_coefficient
+
+            logger.info(f"Params: {kwargs_with_a}, loss: {loss}, liquidation discount: {liquidation_discount}")
+
+            losses.append(loss)
+            discounts.append(liquidation_discount)
+
+        results = [(liquidity_range, losses), (liquidity_range, discounts)]
+
+        save_json_results(pair, f"losses_initial_range__{samples}_{n_top_samples}", results)
+        save_plot(
+            pair,
+            f"losses_range__{samples}_{n_top_samples}",
+            (liquidity_range, losses),
+            (liquidity_range, discounts),
+            {"xlabel": "Initial range N", "ylabel": "Loss"},
+            kwargs,
+        )
+        return results
+
+    @classmethod
+    def simulate_dynamic_fee(
+        cls,
+        pair: str,
+        t_exp: int,
+        a: int,
+        samples: int = 500000,
+        n_top_samples: int = 50,
+        min_loan_duration: float | None = None,
+        max_loan_duration: float | None = None,
+        initial_liquidity_range: int = 4,
+    ):
+        price_oracle = EmaPriceOracle(t_exp=t_exp)
+        price_history_loader = GenericPriceHistoryLoader(pair=Pair(pair))
+
+        simulator = Simulator(
+            initial_liquidity_class=ConstantInitialLiquidity,
+            price_history_loader=price_history_loader,
+            price_oracle=price_oracle,
+            external_fee=cls.EXTERNAL_FEE,
+        )
+
+        losses = []
+        discounts = []
+
+        kwargs = {
+            "samples": samples,
+            "n_top_samples": n_top_samples,
+            "A": a,
+            "initial_liquidity_range": initial_liquidity_range,
+            "min_loan_duration": min_loan_duration,
+            "max_loan_duration": max_loan_duration,
+        }
+
+        d_fee_range = [d / 100 for d in range(10, 50, 3)]
+        for d_fee in d_fee_range:
+            kwargs_with_a = {**kwargs, "dynamic_fee_multiplier": d_fee}
+            loss = simulator.get_loss_rate(**kwargs_with_a)
+
+            # Simplified formula
+            # bands_coefficient = (((A - 1) / A) ** range_size) ** 0.5
+            # More precise
+            bands_coefficient = (
+                sum(((a - 1) / a) ** (k + 0.5) for k in range(initial_liquidity_range)) / initial_liquidity_range
+            )
+            liquidation_discount = 1 - (1 - loss) * bands_coefficient
+
+            logger.info(f"Params: {kwargs_with_a}, loss: {loss}, liquidation discount: {liquidation_discount}")
+
+            losses.append(loss)
+            discounts.append(liquidation_discount)
+
+        results = [(d_fee_range, losses), (d_fee_range, discounts)]
+
+        save_json_results(pair, f"losses_dynamic_fee__{samples}_{n_top_samples}", results)
+        save_plot(
+            pair,
+            f"losses_dynamic_fee__{samples}_{n_top_samples}",
+            (d_fee_range, losses),
+            (d_fee_range, discounts),
+            {"xlabel": "Dynamic fee", "ylabel": "Loss"},
+            kwargs,
+        )
+        return results
+
 
 def save_plot(
     pair: str,
@@ -102,7 +232,7 @@ def save_plot(
     plt.text(
         min_discount_A * 1.05,
         max(discounts[1]) * 0.4,
-        f"A = {min_discount_A}, Discount={min_discount:.3f}",
+        f"{plot_kwargs.get('xlabel', 'x')} = {min_discount_A}, Discount={min_discount:.3f}",
         rotation=90,
         color="black",
         va="bottom",
@@ -110,7 +240,7 @@ def save_plot(
 
     # Caption text for parameters
     plt.text(
-        15,
+        max(discounts[0]) * 15 / 100,
         max(discounts[1]),  # (x, y) position on chart
         "\n".join(f"{k}: {capture_kwargs[k]}" for k in capture_kwargs if capture_kwargs[k] is not None),
         color="black",

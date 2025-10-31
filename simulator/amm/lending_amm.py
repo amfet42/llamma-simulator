@@ -108,8 +108,8 @@ class LendingAMM:
 
         # solve:
         # p_o * A * y0**2 - y0 * (p_top/p_o * (A-1) * x + p_o**2/p_top * A * y) - xy = 0
-        b = p_top / p_o * (A - 1) * x + p_o**2 / p_top * A * y
         a = p_o * A
+        b = p_top / p_o * (A - 1) * x + p_o**2 / p_top * A * y
         D = b**2 + 4 * a * x * y
         return (b + sqrt(D)) / (2 * a)
 
